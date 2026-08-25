@@ -4,7 +4,6 @@ const fs = require('fs-extra');
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
-const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,164 +16,56 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 fs.ensureDirSync(PHOTO_DIR);
 
-// --- Improved Database ---
 const readDB = () => {
-  try {
-    if (!fs.existsSync(DB_PATH)) {
-      const defaultDB = { users: [], userData: {} };
-      fs.writeJsonSync(DB_PATH, defaultDB);
-      return defaultDB;
-    }
-    const data = fs.readJsonSync(DB_PATH);
-    if (!data.users) data.users = [];
-    if (!data.userData) data.userData = {};
-    return data;
-  } catch (err) {
-    const defaultDB = { users: [], userData: {} };
-    fs.writeJsonSync(DB_PATH, defaultDB);
-    return defaultDB;
+  if (!fs.existsSync(DB_PATH)) {
+    fs.writeJsonSync(DB_PATH, { pin: '1234', photos: [], deleted: [], albums: [], token: null });
   }
+  return fs.readJsonSync(DB_PATH);
 };
 const writeDB = (data) => fs.writeJsonSync(DB_PATH, data);
 
-// Password hashing
-const hashPassword = (password) => {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return salt + ':' + hash;
-};
-const verifyPassword = (password, stored) => {
-  const [salt, hash] = stored.split(':');
-  const computed = crypto.scryptSync(password, salt, 64).toString('hex');
-  return computed === hash;
-};
-
-// User helpers
-const findUserByToken = (token) => {
-  const db = readDB();
-  return db.users.find(u => u.token === token);
-};
-const findUserByPhone = (phone) => {
-  const db = readDB();
-  return db.users.find(u => u.phone === phone);
-};
-const getUserData = (userId) => {
-  const db = readDB();
-  if (!db.userData[userId]) {
-    db.userData[userId] = { photos: [], deleted: [], albums: [] };
-    writeDB(db);
-  }
-  return db.userData[userId];
-};
-const saveUserData = (userId, data) => {
-  const db = readDB();
-  db.userData[userId] = data;
-  writeDB(db);
-};
-
-const requireAuth = (req, res, next) => {
-  const token = req.headers.authorization;
-  if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  const user = findUserByToken(token);
-  if (!user) return res.status(403).json({ error: 'Invalid token' });
-  req.user = user;
-  next();
-};
-
 app.use('/photos', express.static(PHOTO_DIR));
 
-// API Routes
-app.post('/api/register', (req, res) => {
-  const { phone, password } = req.body;
-  if (!phone || !password) return res.status(400).json({ error: 'Phone and password required' });
-  if (password.length < 4) return res.status(400).json({ error: 'Password min 4 chars' });
-  const db = readDB();
-  if (db.users.find(u => u.phone === phone)) {
-    return res.status(400).json({ error: 'Phone already registered' });
-  }
-  const userId = uuidv4();
-  const token = uuidv4();
-  db.users.push({
-    id: userId,
-    phone,
-    password_hash: hashPassword(password),
-    pin_hash: null,
-    token
-  });
-  db.userData[userId] = { photos: [], deleted: [], albums: [] };
-  writeDB(db);
-  res.json({ success: true, token, pinSet: false });
-});
-
 app.post('/api/login', (req, res) => {
-  const { phone, password } = req.body;
-  if (!phone || !password) return res.status(400).json({ error: 'Phone and password required' });
-  const user = findUserByPhone(phone);
-  if (!user) return res.status(401).json({ error: 'Invalid phone or password' });
-  if (!verifyPassword(password, user.password_hash)) {
-    return res.status(401).json({ error: 'Invalid phone or password' });
-  }
-  const token = uuidv4();
-  user.token = token;
-  const db = readDB();
-  db.users = db.users.map(u => u.id === user.id ? user : u);
-  writeDB(db);
-  res.json({ success: true, token, pinSet: !!user.pin_hash });
-});
-
-app.post('/api/set-pin', requireAuth, (req, res) => {
   const { pin } = req.body;
-  if (!pin || pin.length !== 4) return res.status(400).json({ error: 'PIN must be 4 digits' });
-  const user = req.user;
-  user.pin_hash = hashPassword(pin);
   const db = readDB();
-  db.users = db.users.map(u => u.id === user.id ? user : u);
-  writeDB(db);
-  res.json({ success: true });
-});
-
-app.post('/api/verify-pin', requireAuth, (req, res) => {
-  const { pin } = req.body;
-  if (!pin) return res.status(400).json({ error: 'PIN required' });
-  const user = req.user;
-  if (!user.pin_hash) return res.status(400).json({ error: 'PIN not set' });
-  if (!verifyPassword(pin, user.pin_hash)) {
-    return res.status(401).json({ error: 'Wrong PIN' });
+  if (pin === db.pin) {
+    const token = uuidv4();
+    db.token = token;
+    writeDB(db);
+    res.json({ success: true, token });
+  } else {
+    res.status(401).json({ error: 'Wrong PIN' });
   }
-  res.json({ success: true });
 });
 
-app.get('/api/photos', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  res.json(data.photos.sort((a, b) => b.created - a.created));
+app.get('/api/photos', (req, res) => {
+  const db = readDB();
+  res.json(db.photos);
 });
 
-app.get('/api/deleted', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  res.json(data.deleted.sort((a, b) => b.deleted_at - a.deleted_at));
+app.get('/api/deleted', (req, res) => {
+  const db = readDB();
+  res.json(db.deleted);
 });
 
-app.get('/api/albums', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  res.json(data.albums.sort((a, b) => b.created - a.created));
+app.get('/api/albums', (req, res) => {
+  const db = readDB();
+  res.json(db.albums);
 });
 
-app.post('/api/albums', requireAuth, (req, res) => {
+app.post('/api/albums', (req, res) => {
   const { name } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
-  const data = getUserData(req.user.id);
+  const db = readDB();
   const album = { id: uuidv4(), name, created: Date.now() };
-  data.albums.push(album);
-  saveUserData(req.user.id, data);
+  db.albums.push(album);
+  writeDB(db);
   res.json(album);
 });
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const userDir = path.join(PHOTO_DIR, req.user.id);
-    fs.ensureDirSync(userDir);
-    cb(null, userDir);
-  },
+  destination: (req, file, cb) => cb(null, PHOTO_DIR),
   filename: (req, file, cb) => cb(null, uuidv4() + path.extname(file.originalname))
 });
 const upload = multer({
@@ -183,128 +74,87 @@ const upload = multer({
   fileFilter: (req, file, cb) => cb(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype))
 });
 
-app.post('/api/upload', requireAuth, upload.array('photos'), (req, res) => {
+app.post('/api/upload', upload.array('photos'), (req, res) => {
   const files = req.files;
   if (!files || !files.length) return res.status(400).json({ error: 'No files' });
-  const data = getUserData(req.user.id);
+  const db = readDB();
   const newPhotos = files.map(f => ({
     id: uuidv4(),
     name: f.originalname,
     file: f.filename,
     created: Date.now()
   }));
-  data.photos.push(...newPhotos);
-  saveUserData(req.user.id, data);
+  db.photos.push(...newPhotos);
+  writeDB(db);
   res.json({ count: files.length });
 });
 
-app.get('/api/photo/:id', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  const photo = data.photos.find(p => p.id === req.params.id);
-  if (!photo) return res.status(404).json({ error: 'Photo not found' });
-  const filePath = path.join(PHOTO_DIR, req.user.id, photo.file);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing' });
-  res.sendFile(filePath);
-});
-
-app.delete('/api/photos/:id', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  const idx = data.photos.findIndex(p => p.id === req.params.id);
+app.delete('/api/photos/:id', (req, res) => {
+  const db = readDB();
+  const idx = db.photos.findIndex(p => p.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const photo = data.photos.splice(idx, 1)[0];
-  data.deleted.push({
+  const photo = db.photos.splice(idx, 1)[0];
+  db.deleted.push({
     id: photo.id,
     name: photo.name,
     file: photo.file,
     deleted_at: Date.now(),
     expires_at: Date.now() + 30 * 24 * 60 * 60 * 1000
   });
-  saveUserData(req.user.id, data);
-  res.json({ success: true });
-});
-
-app.post('/api/photos/:id/restore', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  const idx = data.deleted.findIndex(d => d.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const del = data.deleted.splice(idx, 1)[0];
-  data.photos.push({ id: del.id, name: del.name, file: del.file, created: Date.now() });
-  saveUserData(req.user.id, data);
-  res.json({ success: true });
-});
-
-app.delete('/api/photos/:id/permanent', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  const idx = data.deleted.findIndex(d => d.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Not found' });
-  const del = data.deleted.splice(idx, 1)[0];
-  const filePath = path.join(PHOTO_DIR, req.user.id, del.file);
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  saveUserData(req.user.id, data);
-  res.json({ success: true });
-});
-
-app.post('/api/deleted/restore-all', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  const list = [...data.deleted];
-  list.forEach(d => {
-    data.photos.push({ id: d.id, name: d.name, file: d.file, created: Date.now() });
-  });
-  data.deleted = [];
-  saveUserData(req.user.id, data);
-  res.json({ success: true });
-});
-
-app.delete('/api/deleted/delete-all', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  data.deleted.forEach(d => {
-    const filePath = path.join(PHOTO_DIR, req.user.id, d.file);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  });
-  data.deleted = [];
-  saveUserData(req.user.id, data);
-  res.json({ success: true });
-});
-
-app.get('/api/storage', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  let photoSize = 0;
-  const userDir = path.join(PHOTO_DIR, req.user.id);
-  if (fs.existsSync(userDir)) {
-    try { fs.readdirSync(userDir).forEach(f => photoSize += fs.statSync(path.join(userDir, f)).size); } catch(e) {}
-  }
-  res.json({ photos: data.photos.length, albums: data.albums.length, photoStorage: photoSize });
-});
-
-app.post('/api/change-pin', requireAuth, (req, res) => {
-  const { currentPin, newPin } = req.body;
-  if (!currentPin || !newPin || newPin.length !== 4) {
-    return res.status(400).json({ error: 'Invalid PIN' });
-  }
-  const user = req.user;
-  if (!user.pin_hash) return res.status(400).json({ error: 'PIN not set' });
-  if (!verifyPassword(currentPin, user.pin_hash)) {
-    return res.status(401).json({ error: 'Wrong current PIN' });
-  }
-  user.pin_hash = hashPassword(newPin);
-  const db = readDB();
-  db.users = db.users.map(u => u.id === user.id ? user : u);
   writeDB(db);
   res.json({ success: true });
 });
 
-app.get('/api/settings/auto-lock', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  res.json({ minutes: data.auto_lock || 0 });
-});
-app.post('/api/settings/auto-lock', requireAuth, (req, res) => {
-  const data = getUserData(req.user.id);
-  data.auto_lock = req.body.minutes;
-  saveUserData(req.user.id, data);
+app.post('/api/photos/:id/restore', (req, res) => {
+  const db = readDB();
+  const idx = db.deleted.findIndex(d => d.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const del = db.deleted.splice(idx, 1)[0];
+  db.photos.push({ id: del.id, name: del.name, file: del.file, created: Date.now() });
+  writeDB(db);
   res.json({ success: true });
 });
 
-// ---------- HTML frontend ----------
+app.delete('/api/photos/:id/permanent', (req, res) => {
+  const db = readDB();
+  const idx = db.deleted.findIndex(d => d.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const del = db.deleted.splice(idx, 1)[0];
+  const filePath = path.join(PHOTO_DIR, del.file);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  writeDB(db);
+  res.json({ success: true });
+});
+
+app.post('/api/deleted/restore-all', (req, res) => {
+  const db = readDB();
+  const list = [...db.deleted];
+  list.forEach(d => {
+    db.photos.push({ id: d.id, name: d.name, file: d.file, created: Date.now() });
+  });
+  db.deleted = [];
+  writeDB(db);
+  res.json({ success: true });
+});
+
+app.delete('/api/deleted/delete-all', (req, res) => {
+  const db = readDB();
+  db.deleted.forEach(d => {
+    const filePath = path.join(PHOTO_DIR, d.file);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  });
+  db.deleted = [];
+  writeDB(db);
+  res.json({ success: true });
+});
+
+app.get('/api/storage', (req, res) => {
+  const db = readDB();
+  let photoSize = 0;
+  try { fs.readdirSync(PHOTO_DIR).forEach(f => photoSize += fs.statSync(path.join(PHOTO_DIR, f)).size); } catch(e) {}
+  res.json({ photos: db.photos.length, albums: db.albums.length, photoStorage: photoSize });
+});
+
 app.get('*', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html>
@@ -318,10 +168,10 @@ app.get('*', (req, res) => {
     #app{width:100%;max-width:600px;background:#12121a;padding:20px 16px 80px;min-height:100vh}
     .screen{display:none}.screen.active{display:block}
     .glass{background:rgba(255,255,255,0.05);border-radius:24px;padding:20px;backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.08)}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+    .grid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;cursor:pointer}
     .btn{background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);color:#fff;padding:12px 20px;border-radius:16px;cursor:pointer;font-size:16px;margin:8px 0;display:inline-block;text-align:center}
     .btn.primary{background:rgba(120,80,255,0.3);border-color:rgba(120,80,255,0.4)}
-    .btn.danger{background:rgba(255,60,60,0.2);border-color:rgba(255,60,60,0.3)}
-    .input-field{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#fff;font-size:16px;margin-bottom:12px}
     .pin-dots{font-size:32px;letter-spacing:12px;text-align:center;margin:20px 0}
     .pin-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;max-width:300px;margin:20px auto}
     .pin-key{background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:50%;aspect-ratio:1;font-size:24px;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:0.1s}
@@ -364,7 +214,6 @@ app.get('*', (req, res) => {
     .album-item .info{flex:1}
     .album-item .info .name{font-weight:500}
     .album-item .info .count{font-size:13px;color:#888}
-    .error-msg{color:#ff6b6b;margin-top:8px;font-size:14px}
   </style>
 </head>
 <body>
@@ -405,9 +254,8 @@ const api = {
 };
 
 let state = {
-  screen: 'login',
+  screen: 'pin',
   token: localStorage.getItem('token') || null,
-  pinSet: false,
   photos: [],
   deleted: [],
   albums: [],
@@ -420,42 +268,14 @@ function render() {
   let html = '';
   const s = state.screen;
 
-  if (s === 'login') {
-    html = \`
-      <div class="screen active">
-        <div class="glass" style="max-width:360px;margin:60px auto;text-align:center">
-          <h2>🔒 Private Vault</h2>
-          <p style="color:#aaa;margin:8px 0">Login to your vault</p>
-          <input class="input-field" type="text" id="loginPhone" placeholder="Phone number">
-          <input class="input-field" type="password" id="loginPassword" placeholder="Password">
-          <button class="btn primary" style="width:100%" onclick="doLogin()">Login</button>
-          <div id="loginError" class="error-msg"></div>
-          <p style="margin-top:16px;color:#888">New user? <span style="color:#a88bff;cursor:pointer" onclick="navigate('register')">Register</span></p>
-        </div>
-      </div>
-    \`;
-  } else if (s === 'register') {
-    html = \`
-      <div class="screen active">
-        <div class="glass" style="max-width:360px;margin:60px auto;text-align:center">
-          <h2>🔒 Create Account</h2>
-          <p style="color:#aaa;margin:8px 0">Register with phone & password</p>
-          <input class="input-field" type="text" id="regPhone" placeholder="Phone number">
-          <input class="input-field" type="password" id="regPassword" placeholder="Password (min 4 chars)">
-          <button class="btn primary" style="width:100%" onclick="doRegister()">Register</button>
-          <div id="regError" class="error-msg"></div>
-          <p style="margin-top:16px;color:#888">Already have account? <span style="color:#a88bff;cursor:pointer" onclick="navigate('login')">Login</span></p>
-        </div>
-      </div>
-    \`;
-  } else if (s === 'pin') {
+  if (s === 'pin') {
     html = \`
       <div class="screen active">
         <div class="glass" style="max-width:320px;margin:40px auto;text-align:center">
-          <h2>🔒 \${state.pinSet ? 'Enter PIN' : 'Set PIN'}</h2>
-          <p style="color:#aaa;margin:8px 0">\${state.pinSet ? 'Unlock your vault' : 'Set your 4-digit PIN'}</p>
+          <h2>🔒 Private Vault</h2>
+          <p style="color:#aaa;margin:8px 0">Enter PIN</p>
           <div class="pin-dots" id="pinDots">●●●●</div>
-          <div id="pinError" class="error-msg"></div>
+          <div id="pinError" style="color:red;min-height:24px"></div>
           <div class="pin-keypad" id="keypad">
             <button class="pin-key" data-v="1">1</button>
             <button class="pin-key" data-v="2">2</button>
@@ -490,9 +310,6 @@ function render() {
           <div class="feature-card" onclick="navigate('deleted')"><div class="icon">🗑</div><div class="label">Deleted</div></div>
           <div class="feature-card" onclick="navigate('settings')"><div class="icon">⚙</div><div class="label">Settings</div></div>
         </div>
-        <div style="text-align:center;color:#555;font-size:13px;margin-top:30px;border-top:1px solid rgba(255,255,255,0.06);padding-top:16px;">
-          Made by MR. RAHUL
-        </div>
       </div>
     \`;
   } else if (s === 'photos') {
@@ -506,7 +323,7 @@ function render() {
     } else {
       html += \`<div class="grid">\`;
       photos.forEach(p => {
-        html += \`<img src="/api/photo/\${p.id}" onclick="viewPhoto('\${p.id}')" loading="lazy">\`;
+        html += \`<img src="/photos/\${p.file}" onclick="viewPhoto('\${p.id}')" loading="lazy">\`;
       });
       html += \`</div>\`;
     }
@@ -522,7 +339,7 @@ function render() {
               <button onclick="deletePhoto('\${p.id}')" style="margin-right:8px">🗑</button>
             </div>
           </div>
-          <img class="viewer-image" src="/api/photo/\${p.id}" alt="">
+          <img class="viewer-image" src="/photos/\${p.file}" alt="">
         </div>
       \`;
     } else { html = '<div>Not found</div>'; goBack(); }
@@ -559,7 +376,7 @@ function render() {
         const days = Math.max(0, Math.ceil((d.expires_at - Date.now()) / 86400000));
         html += \`
           <div class="deleted-item">
-            <img class="thumb" src="/api/photo/\${d.id}">
+            <img class="thumb" src="/photos/\${d.file}">
             <div class="info"><div class="name">\${d.name}</div><div class="days">\${days} days left</div></div>
             <div class="actions">
               <button onclick="restorePhoto('\${d.id}')">↩️</button>
@@ -621,9 +438,9 @@ function render() {
       <div class="screen active">
         <div class="topbar"><span class="back" onclick="goBack()">←</span><span>Auto Lock</span></div>
         <div class="glass" style="margin-top:16px">
-          <div><label><input type="radio" name="autoLock" value="0" checked> Off</label></div>
+          <div><label><input type="radio" name="autoLock" value="0"> Off</label></div>
           <div><label><input type="radio" name="autoLock" value="1"> 1 Minute</label></div>
-          <div><label><input type="radio" name="autoLock" value="5"> 5 Minutes</label></div>
+          <div><label><input type="radio" name="autoLock" value="5" checked> 5 Minutes</label></div>
           <div><label><input type="radio" name="autoLock" value="15"> 15 Minutes</label></div>
           <div><label><input type="radio" name="autoLock" value="30"> 30 Minutes</label></div>
           <button class="btn primary" style="width:100%;margin-top:12px" onclick="saveAutoLock()">Save</button>
@@ -644,76 +461,22 @@ function render() {
         <div class="glass" style="text-align:center;margin-top:16px">
           <div style="font-size:48px">🔒</div>
           <h2>Private Photo Vault</h2>
-          <p>Version 2.0 (Multi-User)</p>
-          <p style="margin-top:16px;color:#aaa">Secure local photo storage with PIN protection.<br>Each user has own phone+password and PIN.</p>
+          <p>Version 2.0</p>
+          <p style="margin-top:16px;color:#aaa">Secure local photo storage with PIN protection.<br>All data stored locally.<br>No cloud upload.</p>
         </div>
       </div>
     \`;
   }
 
   app.innerHTML = html;
-  document.getElementById('bottomNav').style.display = (s === 'login' || s === 'register' || s === 'pin' || s === 'viewer') ? 'none' : 'flex';
+  document.getElementById('bottomNav').style.display = (s === 'pin' || s === 'viewer') ? 'none' : 'flex';
 
-  if (s === 'login') attachLoginEvents();
-  if (s === 'register') attachRegisterEvents();
   if (s === 'pin') attachPinEvents();
   if (s === 'import') attachImportEvents();
   if (s === 'change-pin') attachChangePinEvents();
   if (s === 'auto-lock') loadAutoLock();
   if (s === 'storage') loadStorage();
 }
-
-function attachLoginEvents() {
-  const pass = document.getElementById('loginPassword');
-  if (pass) pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
-}
-function attachRegisterEvents() {
-  const pass = document.getElementById('regPassword');
-  if (pass) pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') doRegister(); });
-}
-
-window.doLogin = async function() {
-  const phone = document.getElementById('loginPhone').value.trim();
-  const password = document.getElementById('loginPassword').value;
-  const err = document.getElementById('loginError');
-  if (!phone || !password) { err.textContent = 'Please fill all fields'; return; }
-  try {
-    const data = await api.post('/api/login', { phone, password });
-    if (data.success) {
-      state.token = data.token;
-      localStorage.setItem('token', data.token);
-      state.pinSet = data.pinSet;
-      state.screen = 'pin';
-      render();
-    } else {
-      err.textContent = data.error || 'Login failed';
-    }
-  } catch(e) {
-    err.textContent = e.message || 'Error';
-  }
-};
-
-window.doRegister = async function() {
-  const phone = document.getElementById('regPhone').value.trim();
-  const password = document.getElementById('regPassword').value;
-  const err = document.getElementById('regError');
-  if (!phone || !password) { err.textContent = 'Please fill all fields'; return; }
-  if (password.length < 4) { err.textContent = 'Password must be at least 4 characters'; return; }
-  try {
-    const data = await api.post('/api/register', { phone, password });
-    if (data.success) {
-      state.token = data.token;
-      localStorage.setItem('token', data.token);
-      state.pinSet = false;
-      state.screen = 'pin';
-      render();
-    } else {
-      err.textContent = data.error || 'Registration failed';
-    }
-  } catch(e) {
-    err.textContent = e.message || 'Error';
-  }
-};
 
 function attachPinEvents() {
   let pin = '';
@@ -727,40 +490,23 @@ function attachPinEvents() {
       let d = ''; for (let i = 0; i < 4; i++) d += (i < pin.length) ? '●' : '○';
       dots.textContent = d;
       if (pin.length === 4) {
-        if (state.pinSet) {
-          api.post('/api/verify-pin', { pin }, state.token).then(r => {
-            if (r.success) {
-              state.screen = 'home';
-              loadAllData();
-              render();
-            } else {
-              err.textContent = 'Wrong PIN';
-              pin = '';
-              dots.textContent = '●●●●';
-            }
-          }).catch(() => {
-            err.textContent = 'Error';
+        api.post('/api/login', { pin }).then(r => {
+          if (r.success) {
+            state.token = r.token;
+            localStorage.setItem('token', r.token);
+            state.screen = 'home';
+            loadAllData();
+            render();
+          } else {
+            err.textContent = 'Wrong PIN';
             pin = '';
             dots.textContent = '●●●●';
-          });
-        } else {
-          api.post('/api/set-pin', { pin }, state.token).then(r => {
-            if (r.success) {
-              state.pinSet = true;
-              state.screen = 'home';
-              loadAllData();
-              render();
-            } else {
-              err.textContent = 'Error setting PIN';
-              pin = '';
-              dots.textContent = '●●●●';
-            }
-          }).catch(() => {
-            err.textContent = 'Error';
-            pin = '';
-            dots.textContent = '●●●●';
-          });
-        }
+          }
+        }).catch((e) => {
+          err.textContent = 'Error: ' + e.message;
+          pin = '';
+          dots.textContent = '●●●●';
+        });
       }
     };
   });
@@ -788,33 +534,30 @@ function attachImportEvents() {
 }
 
 function attachChangePinEvents() {
-  const form = document.getElementById('changePinForm');
-  if (form) {
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const cur = document.getElementById('curPin').value;
-      const np = document.getElementById('newPin').value;
-      const cf = document.getElementById('confPin').value;
-      if (np !== cf) { alert('PINs do not match'); return; }
-      if (np.length !== 4) { alert('PIN must be 4 digits'); return; }
-      try {
-        await api.post('/api/change-pin', { currentPin: cur, newPin: np }, state.token);
-        alert('PIN changed successfully');
-        goBack();
-      } catch (e) {
-        alert('Error: ' + (e.message || 'Wrong current PIN'));
-      }
-    };
-  }
+  document.getElementById('changePinForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const cur = document.getElementById('curPin').value;
+    const np = document.getElementById('newPin').value;
+    const cf = document.getElementById('confPin').value;
+    if (np !== cf) { alert('PINs do not match'); return; }
+    if (np.length !== 4) { alert('PIN must be 4 digits'); return; }
+    try {
+      await api.post('/api/change-pin', { currentPin: cur, newPin: np }, state.token);
+      alert('PIN changed successfully');
+      goBack();
+    } catch (e) {
+      alert('Error: ' + (e.message || 'Wrong current PIN'));
+    }
+  };
 }
 
 function loadAutoLock() {
   api.get('/api/settings/auto-lock', state.token).then(r => {
-    const m = r.minutes || 0;
+    const m = r.minutes || 5;
     document.querySelectorAll('input[name="autoLock"]').forEach(el => {
       el.checked = (parseInt(el.value) === m);
     });
-  }).catch(() => {});
+  });
 }
 window.saveAutoLock = function() {
   const sel = document.querySelector('input[name="autoLock"]:checked');
@@ -823,7 +566,7 @@ window.saveAutoLock = function() {
   api.post('/api/settings/auto-lock', { minutes: val }, state.token).then(() => {
     alert('Saved');
     goBack();
-  }).catch(() => {});
+  });
 };
 
 function loadStorage() {
@@ -834,7 +577,7 @@ function loadStorage() {
       <div><strong>Albums:</strong> \${r.albums}</div>
       <div><strong>Storage Used:</strong> \${mb} MB</div>
     \`;
-  }).catch(() => {});
+  });
 }
 
 window.navigate = function(screen) {
@@ -907,52 +650,24 @@ function loadAllData() {
 }
 
 if (state.token) {
-  Promise.all([
-    api.get('/api/photos', state.token),
-    api.get('/api/deleted', state.token),
-    api.get('/api/albums', state.token)
-  ]).then(([photos, deleted, albums]) => {
-    state.photos = photos;
-    state.deleted = deleted;
-    state.albums = albums;
-    const pinSet = localStorage.getItem('pinSet') === 'true';
-    state.pinSet = pinSet;
-    state.screen = pinSet ? 'pin' : 'home';
-    render();
-  }).catch(() => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('pinSet');
-    state.token = null;
-    state.screen = 'login';
-    render();
-  });
+  state.screen = 'home';
+  loadAllData();
 } else {
-  state.screen = 'login';
+  state.screen = 'pin';
   render();
 }
-
-Object.defineProperty(state, 'pinSet', {
-  set: function(val) {
-    localStorage.setItem('pinSet', val ? 'true' : 'false');
-    this._pinSet = val;
-  },
-  get: function() {
-    return this._pinSet;
-  }
-});
-state.pinSet = localStorage.getItem('pinSet') === 'true';
 
 let lockTimer;
 function resetLockTimer() {
   clearTimeout(lockTimer);
   if (!state.token) return;
   api.get('/api/settings/auto-lock', state.token).then(r => {
-    const min = r.minutes || 0;
+    const min = r.minutes || 5;
     if (min > 0) {
       lockTimer = setTimeout(() => {
         state.token = null;
         localStorage.removeItem('token');
-        state.screen = 'login';
+        state.screen = 'pin';
         render();
       }, min * 60 * 1000);
     }
@@ -962,7 +677,7 @@ document.addEventListener('click', resetLockTimer);
 document.addEventListener('touchstart', resetLockTimer);
 resetLockTimer();
 
-console.log('🔐 Private Vault loaded.');
+console.log('🔐 Private Vault loaded. Default PIN: 1234');
 </script>
 </body>
 </html>`);
@@ -970,8 +685,9 @@ console.log('🔐 Private Vault loaded.');
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('================================');
-  console.log('PRIVATE PHOTO VAULT (Multi-User)');
+  console.log('PRIVATE PHOTO VAULT');
   console.log('================================');
-  console.log('Server running on http://127.0.0.1:' + PORT);
+  console.log('Server running on port:', PORT);
+  console.log('Default PIN: 1234');
   console.log('================================');
 });
